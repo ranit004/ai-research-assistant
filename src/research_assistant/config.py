@@ -50,5 +50,13 @@ class Settings(BaseSettings):
     chunk_size: int = 512        # tokens / characters per chunk
     chunk_overlap: int = 64      # overlap between consecutive chunks
 
+    # ── Research engine ────────────────────────────────────────────────────────
+    llm_model: str = "gpt-4o-mini"
+    research_llm_temperature: float = 0.0
+    max_sub_questions: int = 4          # hard cap on decomposition
+    max_research_iterations: int = 3    # prevents infinite refinement loops
+    evidence_min_score: float = 0.35    # minimum cosine similarity to consider a hit
+    evidence_top_k: int = 5             # retrieved hits per sub-question
+
 
 settings = Settings()

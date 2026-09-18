@@ -14,6 +14,7 @@ from starlette.requests import Request
 
 from research_assistant.api.health import router as health_router
 from research_assistant.api.ingest import router as ingest_router
+from research_assistant.api.research import router as research_router
 from research_assistant.api.retrieve import router as retrieve_router
 from research_assistant.config import settings
 from research_assistant.logging_config import setup_logging
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     application.include_router(health_router)
     application.include_router(ingest_router)
     application.include_router(retrieve_router)
+    application.include_router(research_router)
     return application
 
 
