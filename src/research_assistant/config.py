@@ -58,5 +58,9 @@ class Settings(BaseSettings):
     evidence_min_score: float = 0.35    # minimum cosine similarity to consider a hit
     evidence_top_k: int = 5             # retrieved hits per sub-question
 
+    # ── Conversations ──────────────────────────────────────────────────────────
+    max_question_length: int = 2000     # hard cap on user question chars
+    max_history_turns: int = 10         # turns (user+assistant pairs) loaded into graph
+
 
 settings = Settings()

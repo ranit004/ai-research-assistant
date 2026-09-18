@@ -12,6 +12,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
+from research_assistant.api.conversations import router as conversations_router
+from research_assistant.api.documents import router as documents_router
 from research_assistant.api.health import router as health_router
 from research_assistant.api.ingest import router as ingest_router
 from research_assistant.api.research import router as research_router
@@ -50,6 +52,8 @@ def create_app() -> FastAPI:
         )
 
     application.include_router(health_router)
+    application.include_router(documents_router)
+    application.include_router(conversations_router)
     application.include_router(ingest_router)
     application.include_router(retrieve_router)
     application.include_router(research_router)
