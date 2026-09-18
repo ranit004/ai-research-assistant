@@ -70,9 +70,16 @@ def _extract_pdf(data: bytes) -> str:
 
 
 def clean_text(raw: str) -> str:
-    """Normalise whitespace and remove non-printable characters."""
+    """Normalise whitespace and remove non-printable and dangerous Unicode characters."""
     # NFC normalisation so accented chars are consistent
     text = unicodedata.normalize("NFC", raw)
+    # Strip Unicode bidi overrides, invisible markers, and private-use codepoints
+    # that could be used to smuggle hidden instructions through text displays.
+    text = re.sub(
+        r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u206a-\u206f\ufff0-\uffff]",
+        "",
+        text,
+    )
     # Replace form feeds, vertical tabs, etc. with a newline
     text = re.sub(r"[\x0b\x0c\r]", "\n", text)
     # Collapse runs of blank lines to a single blank line

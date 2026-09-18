@@ -63,21 +63,46 @@ def _llm() -> ChatOpenAI:
     )
 
 
+_MAX_EVIDENCE_CHARS = 1500   # per retrieved chunk; prevents runaway LLM context
+_MAX_HISTORY_CHARS = 4000    # total history block injected into any LLM call
+
+# Characters that break XML-style prompt delimiters or JSON parsing
+_STRIP_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\ufff0-\uffff]")
+
+
 def _sanitise(text: str) -> str:
-    """Remove control characters that could alter prompt structure."""
-    # Strip null bytes and other control chars except newline/tab
-    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    """Remove control characters and Unicode direction/invisible overrides.
+
+    Does NOT strip < > or {{ }} because they are legitimate in document text;
+    the prompt templates wrap all untrusted data in explicit XML delimiters
+    so the LLM sees them as data, not structure.
+    """
+    return _STRIP_PATTERN.sub("", text)
+
+
+def _cap(text: str, limit: int) -> str:
+    """Truncate text to *limit* characters, appending a notice when cut."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f" [truncated at {limit} chars]"
 
 
 def _history_text(history: list[dict]) -> str:
+    """Render conversation history as plain text, respecting config limits.
+
+    Uses settings.max_history_turns so the behaviour matches what the API
+    sliced before passing history into the graph.
+    """
     if not history:
         return "(none)"
+    # honour the configured turn limit — take the most-recent turns
+    recent = history[-(settings.max_history_turns * 2):]
     lines = []
-    for turn in history[-6:]:  # last 3 exchanges max
+    for turn in recent:
         role = _sanitise(str(turn.get("role", "user")))
-        content = _sanitise(str(turn.get("content", "")))
+        content = _cap(_sanitise(str(turn.get("content", ""))), 800)
         lines.append(f"{role}: {content}")
-    return "\n".join(lines)
+    return _cap("\n".join(lines), _MAX_HISTORY_CHARS)
 
 
 def _call(system: str, user: str) -> str:
@@ -174,6 +199,7 @@ def retrieve_evidence(state: ResearchState) -> dict:
         for hit in hits:
             if not hit.payload:
                 continue
+            raw_text = _sanitise(hit.payload.get("text", ""))
             evidence.append(
                 EvidenceItem(
                     chunk_id=str(hit.id),
@@ -181,7 +207,8 @@ def retrieve_evidence(state: ResearchState) -> dict:
                     title=hit.payload.get("title", ""),
                     section=hit.payload.get("section", ""),
                     source=hit.payload.get("source", ""),
-                    text=_sanitise(hit.payload.get("text", "")),
+                    # Cap text so a single large chunk cannot fill the LLM context.
+                    text=_cap(raw_text, _MAX_EVIDENCE_CHARS),
                     score=hit.score,
                     sub_question=sq,
                 )
@@ -208,7 +235,9 @@ def evaluate_evidence(state: ResearchState) -> dict:
             continue
 
         excerpts = "\n\n".join(
-            f"[{e['source']}] {e['text']}" for e in evidence
+            # Each evidence text was already sanitised and capped at retrieve time;
+            # re-apply sanitise here as a defence-in-depth measure.
+            f"[{_sanitise(e['source'])}] {_sanitise(e['text'])}" for e in evidence
         )
         user_msg = EVALUATE_USER.format(sub_question=_sanitise(sq), excerpts=excerpts)
 
@@ -238,8 +267,8 @@ def refine_query(state: ResearchState) -> dict:
         for r in state["sub_question_results"]
         if not r["supported"]
     ]
-    original = _sanitise(state.get("rewritten_query") or state["original_query"])
-    failed_text = "\n".join(f"- {_sanitise(q)}" for q in failed)
+    original = _cap(_sanitise(state.get("rewritten_query") or state["original_query"]), 500)
+    failed_text = "\n".join(f"- {_cap(_sanitise(q), 300)}" for q in failed)
     user_msg = REFINE_USER.format(query=original, failed=failed_text)
 
     try:

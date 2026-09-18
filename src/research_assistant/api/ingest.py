@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
 _MAX_FILENAME_LENGTH = 255
+_MAX_CHUNKS_PER_DOCUMENT = 500   # prevents a 10 MB doc producing ~19k embedding calls
 
 
 class IngestResponse(BaseModel):
@@ -78,6 +79,16 @@ async def ingest_document(file: UploadFile) -> IngestResponse:
         title=title,
         source=original_name[:_MAX_FILENAME_LENGTH],
     )
+
+    if len(chunks) > _MAX_CHUNKS_PER_DOCUMENT:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Document produces {len(chunks)} chunks, which exceeds the "
+                f"{_MAX_CHUNKS_PER_DOCUMENT}-chunk limit. "
+                "Please split the document into smaller files."
+            ),
+        )
 
     try:
         vectors = get_embeddings([c.text for c in chunks])

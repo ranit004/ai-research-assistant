@@ -5,6 +5,8 @@ import threading
 import uuid
 from typing import TypedDict
 
+from research_assistant.config import settings
+
 
 class MessageDict(TypedDict):
     role: str
@@ -44,11 +46,21 @@ class ConversationStore:
             return self._get_snapshot(conv)
 
     def add_message(self, conversation_id: str, role: str, content: str) -> bool:
+        """Append a message, evicting oldest entries when the hard cap is reached.
+
+        The hard cap is ``4 * max_history_turns`` messages (i.e. twice what
+        ``get_history`` returns), giving a reasonable retention window without
+        unlimited memory growth.
+        """
         with self._lock:
             conv = self._conversations.get(conversation_id)
             if conv is None:
                 return False
             conv["messages"].append({"role": role, "content": content})
+            cap = settings.max_history_turns * 4
+            if len(conv["messages"]) > cap:
+                # Drop the oldest messages to stay within the cap.
+                conv["messages"] = conv["messages"][-cap:]
             return True
 
     def get_history(self, conversation_id: str, max_turns: int = 10) -> list[dict]:

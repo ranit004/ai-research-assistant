@@ -97,9 +97,15 @@ better evidence in the knowledge base.
 Reply with ONLY the refined query string — no JSON, no explanation."""
 
 REFINE_USER = """\
-Original query: {query}
+Original query:
+<query>
+{query}
+</query>
+
 Failed sub-questions (no useful evidence found):
-{failed}"""
+<failed>
+{failed}
+</failed>"""
 
 # ── synthesize_answer ─────────────────────────────────────────────────────────
 
