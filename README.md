@@ -7,7 +7,7 @@ A backend-only REST API that answers questions grounded in an uploaded knowledge
 ## What it does
 
 1. You upload documents (PDF, plain text, Markdown).
-2. The service chunks and embeds them locally into a Qdrant vector store using Sentence Transformers.
+2. The service chunks and embeds them locally into a Qdrant vector store using Qdrant FastEmbed (ONNX Runtime). Ingestion is idempotent: document content is SHA-256 fingerprinted and chunk IDs are derived deterministically via UUID5 so repeated uploads overwrite existing points in place without duplicating records.
 3. When you ask a question, an eight-node LangGraph pipeline runs: it classifies the question, rewrites it, decomposes it into sub-questions, retrieves and evaluates evidence for each sub-question, refines the search if evidence is insufficient (up to a bounded limit), synthesises an answer from retrieved chunks only, then verifies the answer before returning it.
 4. Every response includes the source chunks that grounded the answer.
 
@@ -42,7 +42,7 @@ src/research_assistant/
 │   └── parser.py            # MIME detection, text extraction, text cleaning
 └── vectorstore/
     ├── client.py            # Qdrant client (lazy, cached), upsert, query_points search
-    └── embedder.py          # Local Sentence Transformers embedding model (all-MiniLM-L6-v2)
+    └── embedder.py          # Local Qdrant FastEmbed embedding model (BAAI/bge-small-en-v1.5)
 ```
 
 ---
@@ -91,14 +91,15 @@ evaluate_evidence     ← LLM judges whether retrieved chunks actually support a
 
 ## Knowledge base
 
-Documents are chunked at 512 characters with a 64-character overlap. Each chunk is embedded into 384-dimensional dense vectors using `sentence-transformers/all-MiniLM-L6-v2` and stored in Qdrant with the following metadata:
+Documents are chunked at 512 characters with a 64-character overlap. Each chunk is embedded into 384-dimensional dense vectors using Qdrant FastEmbed (`BAAI/bge-small-en-v1.5`) and stored in Qdrant with the following metadata:
 
 | Field | Description |
 |---|---|
-| `document_id` | UUID assigned on upload |
-| `chunk_id` | UUID for this chunk |
+| `document_id` | Deterministic UUID5 derived from document content hash |
+| `document_hash` | SHA-256 hex digest of the normalized document text |
+| `chunk_id` | Deterministic UUID5 assigned to this chunk |
 | `chunk_index` | Position within the document |
-| `title` | Filename stem (sanitised, display only) |
+| `title` | Filename stem or heading (sanitised, display only) |
 | `section` | Nearest Markdown heading before this chunk |
 | `source` | Original filename (sanitised, never used as a path) |
 | `text` | Chunk content (bidi overrides and control characters stripped) |
@@ -161,7 +162,7 @@ Copy `.env.example` to `.env`. Every variable has a safe default except `GROQ_AP
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant base URL. |
 | `QDRANT_COLLECTION` | `research_docs` | Collection name. |
 | `QDRANT_API_KEY` | — | Set for authenticated Qdrant Cloud instances. |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local embedding model. |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local FastEmbed model. |
 | `EMBEDDING_DIM` | `384` | Embedding vector dimensions. |
 | `MAX_UPLOAD_BYTES` | `10485760` | Maximum file size (10 MB). |
 | `CHUNK_SIZE` | `512` | Characters per chunk. |
@@ -367,9 +368,11 @@ Test files:
 | `test_ingestion.py` | Parser, chunker, and DocumentChunk model |
 | `test_research_graph.py` | All eight LangGraph nodes and graph routing |
 | `test_conversations.py` | Conversation store and `/conversations` endpoints |
+| `test_fastembed.py` | FastEmbed integration, vector dimension reporting, and collection recreation |
+| `test_idempotency_and_dedup.py` | Idempotent document fingerprinting, deterministic chunk IDs, and score-ranked retrieval deduplication |
 | `test_security_and_eval.py` | Security controls and AI/RAG evaluation dataset |
 
-**77 tests, 0 failures** (no network calls required).
+**93 tests, 0 failures** (no network calls required).
 
 ---
 
@@ -434,7 +437,9 @@ These are deliberate decisions given the assignment time limit:
 
 **Character-based chunking.** Chunks are split by character count, not by token count or semantic boundary. This is simpler and has zero extra dependencies. Token-aware splitting (e.g., `tiktoken`) would produce more consistent chunk sizes but adds complexity.
 
-**Local embedding model.** Embeddings are generated locally using `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions). No external API key is needed for embeddings.
+**Local embedding model.** Embeddings are generated locally using Qdrant FastEmbed (`BAAI/bge-small-en-v1.5`, 384 dimensions). No external API key is needed for embeddings, and the ONNX Runtime model keeps memory usage under 100 MB for Render Free deployment.
+
+**Idempotency and deduplication.** Documents are fingerprinted via SHA-256, generating deterministic UUID5 chunk Point IDs. Repeated uploads overwrite existing points in place atomically without duplicating records. Similarity search automatically deduplicates hits by chunk identity while preserving score ranking.
 
 **No hallucination guarantee.** The system is designed to refuse when evidence is insufficient and to verify answers against retrieved chunks, but a sufficiently misleading knowledge base could still produce incorrect answers.
 

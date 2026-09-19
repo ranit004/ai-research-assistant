@@ -81,7 +81,7 @@ def test_similarity_search_compatibility() -> None:
         fake_client.query_points.assert_called_once_with(
             collection_name=settings.qdrant_collection,
             query=query_vec,
-            limit=5,
+            limit=15,
             score_threshold=0.3,
             with_payload=True,
         )

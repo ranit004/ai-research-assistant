@@ -106,11 +106,14 @@ def similarity_search(
     top_k: int = 5,
     score_threshold: float = 0.0,
 ) -> list[ScoredPoint]:
-    """Return the *top_k* most similar chunks.
+    """Return the *top_k* most similar chunks, deduplicated by chunk identity.
+
+    Fetches candidate points up to (top_k * 3) from Qdrant, deduplicates using
+    `document_hash:chunk_index` (or `chunk_id`), preserving score rank order.
 
     Args:
         query_vector: Embedding of the query string.
-        top_k: Maximum number of results.
+        top_k: Maximum number of deduplicated results to return.
         score_threshold: Minimum cosine similarity score (0–1).
 
     Returns:
@@ -120,13 +123,39 @@ def similarity_search(
         raise ValueError("top_k must be between 1 and 100.")
 
     client = _get_client()
+    # Fetch candidate window to deduplicate legacy/duplicate points while serving top_k
+    fetch_limit = min(max(top_k * 3, top_k + 10), 100)
     response = client.query_points(
         collection_name=settings.qdrant_collection,
         query=query_vector,
-        limit=top_k,
+        limit=fetch_limit,
         score_threshold=score_threshold,
         with_payload=True,
     )
-    results = response.points
-    logger.debug("Similarity search returned %d results.", len(results))
-    return results
+    raw_results = response.points
+
+    deduped: list[ScoredPoint] = []
+    seen_keys: set[str] = set()
+
+    for point in raw_results:
+        payload = point.payload or {}
+        doc_key = payload.get("document_hash") or payload.get("source") or payload.get("document_id") or ""
+        chunk_idx = payload.get("chunk_index")
+
+        if doc_key and chunk_idx is not None:
+            key = f"{doc_key}:{chunk_idx}"
+        else:
+            key = str(point.id)
+
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(point)
+            if len(deduped) == top_k:
+                break
+
+    logger.debug(
+        "Similarity search: %d candidate hits -> %d deduplicated results.",
+        len(raw_results),
+        len(deduped),
+    )
+    return deduped

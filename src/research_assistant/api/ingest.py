@@ -7,20 +7,23 @@ Security controls:
 - Secrets are never logged.
 - Internal errors return 500 with a generic message; no stack traces leak.
 
-Performance:
-- FIX 4: The endpoint is a plain ``def`` so FastAPI executes it in its
-  default thread pool, keeping the event loop free during blocking I/O
-  (parsing, embedding inference, Qdrant upsert).
-- Size is validated as early as possible, before any parsing work.
+Idempotency & Concurrency Safety:
+- Document identity and chunk IDs are generated deterministically using SHA-256
+  and UUID5 namespaces based on document content.
+- Repeated uploads of identical content produce identical Qdrant Point IDs,
+  overwriting existing chunks atomically rather than creating duplicate points.
 """
 
 import logging
-import uuid
 
 from fastapi import APIRouter, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from research_assistant.ingestion.chunker import chunk_text
+from research_assistant.ingestion.chunker import (
+    chunk_text,
+    compute_document_hash,
+    generate_document_id,
+)
 from research_assistant.ingestion.parser import clean_text, extract_text, validate_upload
 from research_assistant.vectorstore.client import ensure_collection, upsert_chunks
 from research_assistant.vectorstore.embedder import get_embeddings
@@ -39,31 +42,40 @@ class IngestResponse(BaseModel):
     title: str
 
 
-def _safe_title(filename: str) -> str:
-    """Derive a display title from the uploaded filename.
+def _safe_title(filename: str, text: str | None = None) -> str:
+    """Derive a display title from the uploaded filename or document heading.
 
     The result is used only as metadata; it is never used as a filesystem path.
+    Strips known extensions cleanly without truncating numbers in filenames.
     """
-    # Keep only the basename (no directory separators)
-    name = filename.replace("\\", "/").split("/")[-1]
-    # Strip the extension for a clean title
-    if "." in name:
-        name = name.rsplit(".", 1)[0]
-    return name[:_MAX_FILENAME_LENGTH] or "untitled"
+    name = filename.replace("\\", "/").split("/")[-1].strip()
+    lower = name.lower()
+    for ext in (".pdf", ".txt", ".markdown", ".md"):
+        if lower.endswith(ext):
+            name = name[:-len(ext)].strip()
+            break
+
+    title = name[:_MAX_FILENAME_LENGTH] or "untitled"
+
+    if text and (title in ("untitled", "upload")):
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                heading = stripped.lstrip("#").strip()
+                if heading:
+                    return heading[:_MAX_FILENAME_LENGTH]
+                break
+
+    return title
 
 
-# FIX 4: Changed from `async def` to `def` so FastAPI dispatches this to its
-# default threadpool executor, preventing blocking operations (text extraction,
-# local embedding inference, Qdrant upsert) from stalling the event loop.
 @router.post("/document", response_model=IngestResponse, status_code=status.HTTP_200_OK)
 def ingest_document(file: UploadFile) -> IngestResponse:
     """Accept a document upload, parse and chunk it, embed each chunk, and
-    store the results in Qdrant.
+    store the results in Qdrant deterministically and idempotently.
 
     Allowed types: PDF, plain text, Markdown (max 10 MB by default).
     """
-    # FIX 4: UploadFile.file is a SpooledTemporaryFile; .read() is synchronous
-    # and safe inside a sync endpoint running in a thread.
     raw = file.file.read()
     original_name = file.filename or "upload"
 
@@ -71,9 +83,6 @@ def ingest_document(file: UploadFile) -> IngestResponse:
         mime = validate_upload(raw, original_name)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
-    document_id = str(uuid.uuid4())
-    title = _safe_title(original_name)
 
     text = extract_text(raw, mime)
     text = clean_text(text)
@@ -84,9 +93,14 @@ def ingest_document(file: UploadFile) -> IngestResponse:
             detail="No extractable text found in the uploaded document.",
         )
 
+    doc_hash = compute_document_hash(text)
+    document_id = generate_document_id(doc_hash)
+    title = _safe_title(original_name, text)
+
     chunks = chunk_text(
         text=text,
         document_id=document_id,
+        document_hash=doc_hash,
         title=title,
         source=original_name[:_MAX_FILENAME_LENGTH],
     )
@@ -126,8 +140,9 @@ def ingest_document(file: UploadFile) -> IngestResponse:
         )
 
     logger.info(
-        "Ingested document_id=%s title=%r chunks=%d",
+        "Ingested document_id=%s doc_hash=%s title=%r chunks=%d",
         document_id,
+        doc_hash[:8],
         title,
         len(chunks),
     )

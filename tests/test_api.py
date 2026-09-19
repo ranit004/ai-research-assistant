@@ -166,7 +166,7 @@ def test_similarity_search_uses_query_points(monkeypatch) -> None:
     mock_client.query_points.assert_called_once_with(
         collection_name=client_mod.settings.qdrant_collection,
         query=[0.1, 0.2, 0.3],
-        limit=5,
+        limit=15,
         score_threshold=0.5,
         with_payload=True,
     )
