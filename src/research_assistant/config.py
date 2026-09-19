@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
     groq_model: str = "openai/gpt-oss-120b"
 
-    # ── Embeddings (local — no external API call) ───────────────────────────────
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # ── Embeddings (FastEmbed local — no external API call) ────────────────────
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
 
     # ── Ingestion limits ───────────────────────────────────────────────────────

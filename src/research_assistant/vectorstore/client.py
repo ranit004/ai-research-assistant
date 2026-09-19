@@ -37,20 +37,38 @@ def _get_client() -> QdrantClient:
 
 
 def ensure_collection() -> None:
-    """Create the collection if it does not already exist."""
+    """Create the collection if it does not already exist, or recreate if vector dimension mismatches."""
     client = _get_client()
-    existing = {c.name for c in client.get_collections().collections}
-    if settings.qdrant_collection not in existing:
+    target_dim = settings.embedding_dim
+    existing_collections = {c.name for c in client.get_collections().collections}
+
+    if settings.qdrant_collection in existing_collections:
+        try:
+            info = client.get_collection(collection_name=settings.qdrant_collection)
+            current_size = info.config.params.vectors.size
+            if current_size != target_dim:
+                logger.warning(
+                    "Existing Qdrant collection '%s' dimension (%d) does not match target (%d). Recreating collection.",
+                    settings.qdrant_collection,
+                    current_size,
+                    target_dim,
+                )
+                client.delete_collection(collection_name=settings.qdrant_collection)
+                existing_collections.remove(settings.qdrant_collection)
+        except Exception as exc:
+            logger.warning("Could not verify existing collection dimension: %s", exc)
+
+    if settings.qdrant_collection not in existing_collections:
         client.create_collection(
             collection_name=settings.qdrant_collection,
             vectors_config=VectorParams(
-                size=settings.embedding_dim,
+                size=target_dim,
                 distance=Distance.COSINE,
             ),
         )
-        logger.info("Created Qdrant collection '%s'.", settings.qdrant_collection)
+        logger.info("Created Qdrant collection '%s' with dimension %d.", settings.qdrant_collection, target_dim)
     else:
-        logger.debug("Qdrant collection '%s' already exists.", settings.qdrant_collection)
+        logger.debug("Qdrant collection '%s' already exists with matching dimension.", settings.qdrant_collection)
 
 
 def upsert_chunks(chunks: list[DocumentChunk], vectors: list[list[float]]) -> int:
