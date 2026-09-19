@@ -181,7 +181,14 @@ def ask_question(conversation_id: str, request: AskRequest) -> AskResponse:
     sub_questions = final.get("sub_questions") or []
     sub_count = len(sub_questions) if sub_questions else 1
     iteration_count = final.get("iteration_count", 0)
-    query_type = str(final.get("query_type", "standalone"))
+    query_type_val = final.get("query_type", "standalone")
+    # FIX 6: QueryType is a str Enum, so its str() is "QueryType.standalone".
+    # Use .value to get the clean string "standalone".
+    if hasattr(query_type_val, "value"):
+        query_type_str = query_type_val.value
+    else:
+        query_type_str = str(query_type_val)
+
 
     return AskResponse(
         answer=answer,
@@ -191,6 +198,6 @@ def ask_question(conversation_id: str, request: AskRequest) -> AskResponse:
         metadata=ResearchMetadata(
             sub_question_count=sub_count,
             research_iteration_count=iteration_count,
-            query_type=query_type,
+            query_type=query_type_str,
         ),
     )

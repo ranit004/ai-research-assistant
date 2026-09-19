@@ -8,6 +8,8 @@ Security:
 - Conversation history is treated as untrusted user input.
 - System prompts are never overridable by data in the user/evidence role.
 - Chain-of-thought is never surfaced to callers.
+- Delimiter characters (< >) are escaped in retrieved evidence so a malicious
+  document cannot break out of its <evidence> block.
 """
 
 from __future__ import annotations
@@ -71,13 +73,18 @@ _STRIP_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a
 
 
 def _sanitise(text: str) -> str:
-    """Remove control characters and Unicode direction/invisible overrides.
-
-    Does NOT strip < > or {{ }} because they are legitimate in document text;
-    the prompt templates wrap all untrusted data in explicit XML delimiters
-    so the LLM sees them as data, not structure.
-    """
+    """Remove control characters and Unicode direction/invisible overrides."""
     return _STRIP_PATTERN.sub("", text)
+
+
+def _escape_delimiters(text: str) -> str:
+    """Escape < and > so untrusted text cannot break XML-style prompt delimiters.
+
+    FIX 5: A malicious document could contain ``</evidence>`` followed by
+    instruction text.  Escaping makes the raw characters visible to the LLM
+    as document data, not as markup structure.
+    """
+    return text.replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _cap(text: str, limit: int) -> str:
@@ -106,7 +113,12 @@ def _history_text(history: list[dict]) -> str:
 
 
 def _call(system: str, user: str) -> str:
-    """Call the LLM with explicit system/user separation."""
+    """Call the LLM with explicit system/user separation.
+
+    FIX 1: This function does NOT catch exceptions — Groq/API/network failures
+    propagate to the node caller which decides whether to treat the failure as
+    a retryable parse error or a hard API failure.
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
     response = _llm().invoke([SystemMessage(content=system), HumanMessage(content=user)])
     return str(response.content).strip()
@@ -116,16 +128,20 @@ def _call(system: str, user: str) -> str:
 
 
 def understand_query(state: ResearchState) -> dict:
-    """Classify the query type."""
+    """Classify the query type.
+
+    FIX 1: Only JSON parse/validation errors are caught and defaulted; actual
+    LLM/API failures propagate so the API can return 503.
+    """
     raw = _sanitise(state["original_query"])
     history = _history_text(state.get("conversation_history", []))
     user_msg = UNDERSTAND_USER.format(history=history, query=raw)
 
+    result = _call(UNDERSTAND_SYSTEM, user_msg)
     try:
-        result = _call(UNDERSTAND_SYSTEM, user_msg)
         data = json.loads(result)
         query_type = QueryType(data.get("query_type", "standalone"))
-    except Exception:
+    except (json.JSONDecodeError, ValueError, KeyError):
         logger.warning("understand_query parse failed; defaulting to standalone")
         query_type = QueryType.standalone
 
@@ -134,34 +150,42 @@ def understand_query(state: ResearchState) -> dict:
 
 
 def rewrite_query(state: ResearchState) -> dict:
-    """Rewrite the query into a standalone, unambiguous form."""
+    """Rewrite the query into a standalone, unambiguous form.
+
+    FIX 1: LLM failures propagate; only the no-output edge case is defaulted.
+    """
     raw = _sanitise(state["original_query"])
     history = _history_text(state.get("conversation_history", []))
     user_msg = REWRITE_USER.format(history=history, query=raw)
 
-    try:
-        rewritten = _call(REWRITE_SYSTEM, user_msg)
-    except Exception:
-        logger.warning("rewrite_query failed; using original query")
+    rewritten = _call(REWRITE_SYSTEM, user_msg)
+    # Edge case: LLM returned an empty string — fall back to the original
+    if not rewritten:
+        logger.warning("rewrite_query returned empty string; using original query")
         rewritten = raw
 
     logger.debug("rewrite_query: %r", rewritten)
-    return {"rewritten_query": rewritten or raw}
+    return {"rewritten_query": rewritten}
 
 
 def decompose_query(state: ResearchState) -> dict:
-    """Split a compound query into focused sub-questions (capped at max_sub_questions)."""
+    """Split a compound query into focused sub-questions (capped at max_sub_questions).
+
+    FIX 1: Only JSON parse/validation errors are caught; LLM failures propagate.
+    """
     query = _sanitise(state.get("rewritten_query") or state["original_query"])
     user_msg = DECOMPOSE_USER.format(query=query)
     system = DECOMPOSE_SYSTEM.format(max_sub=settings.max_sub_questions)
 
+    result = _call(system, user_msg)
     try:
-        result = _call(system, user_msg)
         sub_questions: list[str] = json.loads(result)
         if not isinstance(sub_questions, list):
             raise ValueError("not a list")
         sub_questions = [str(q).strip() for q in sub_questions if str(q).strip()]
-    except Exception:
+        if not sub_questions:
+            raise ValueError("empty list")
+    except (json.JSONDecodeError, ValueError):
         logger.warning("decompose_query parse failed; using single sub-question")
         sub_questions = [query]
 
@@ -172,18 +196,33 @@ def decompose_query(state: ResearchState) -> dict:
 
 
 def retrieve_evidence(state: ResearchState) -> dict:
-    """Retrieve evidence from Qdrant for each sub-question independently."""
+    """Retrieve evidence from Qdrant for each sub-question independently.
+
+    FIX 3: When a refined_query is present, only replace evidence for the
+    sub-questions that previously had no support; already-supported results are
+    preserved unchanged.
+    """
     sub_questions: list[str] = state.get("sub_questions") or [
         state.get("rewritten_query") or state["original_query"]
     ]
-    # Use refined query if set from a previous iteration
+
+    # FIX 3: Carry forward already-supported results from a prior iteration.
+    prior_results: list[SubQuestionResult] = state.get("sub_question_results") or []
+    prior_by_sq = {r["sub_question"]: r for r in prior_results}
+
     refined = state.get("refined_query", "")
-    if refined:
-        sub_questions = [refined] + sub_questions[1:]
 
     results: list[SubQuestionResult] = []
     for sq in sub_questions:
-        sq_clean = _sanitise(sq)
+        # If this sub-question was already supported, keep its evidence as-is.
+        prior = prior_by_sq.get(sq)
+        if prior and prior.get("supported"):
+            results.append(prior)
+            continue
+
+        # Use the refined query only for sub-questions that previously failed.
+        search_query = refined if refined else sq
+        sq_clean = _sanitise(search_query)
         try:
             vectors = get_embeddings([sq_clean])
             hits = similarity_search(
@@ -221,47 +260,68 @@ def retrieve_evidence(state: ResearchState) -> dict:
 
 
 def evaluate_evidence(state: ResearchState) -> dict:
-    """Ask the LLM whether each sub-question's evidence actually supports an answer."""
+    """Ask the LLM whether each sub-question's evidence actually supports an answer.
+
+    FIX 1: Only JSON parse/validation errors are caught; LLM failures propagate.
+    FIX 2: Evidence sufficiency is tracked per sub-question; all sub-questions
+           must be supported for overall evidence_sufficient to be True.
+    FIX 5: Evidence text is delimiter-escaped before insertion into the prompt.
+    """
     results = state["sub_question_results"]
     updated: list[SubQuestionResult] = []
-    any_supported = False
+    all_supported = True
 
     for item in results:
         sq = item["sub_question"]
         evidence = item["evidence"]
 
+        # FIX 3: Already-supported items from a prior iteration keep their status.
+        if item.get("supported") and evidence:
+            updated.append(item)
+            continue
+
         if not evidence:
+            all_supported = False
             updated.append(SubQuestionResult(sub_question=sq, evidence=[], supported=False))
             continue
 
+        # FIX 5: Escape delimiters before building the excerpts block.
         excerpts = "\n\n".join(
-            # Each evidence text was already sanitised and capped at retrieve time;
-            # re-apply sanitise here as a defence-in-depth measure.
-            f"[{_sanitise(e['source'])}] {_sanitise(e['text'])}" for e in evidence
+            f"[{_sanitise(_escape_delimiters(e['source']))}] "
+            f"{_sanitise(_escape_delimiters(e['text']))}"
+            for e in evidence
         )
         user_msg = EVALUATE_USER.format(sub_question=_sanitise(sq), excerpts=excerpts)
 
+        result = _call(EVALUATE_SYSTEM, user_msg)
         try:
-            result = _call(EVALUATE_SYSTEM, user_msg)
             data = json.loads(result)
             supported = bool(data.get("supported", False))
-        except Exception:
+        except (json.JSONDecodeError, ValueError, KeyError):
             logger.warning("evaluate_evidence parse failed for sub_question=%r", sq)
             supported = False
 
-        if supported:
-            any_supported = True
+        if not supported:
+            all_supported = False
         updated.append(SubQuestionResult(sub_question=sq, evidence=evidence, supported=supported))
 
-    logger.debug("evaluate_evidence: any_supported=%s", any_supported)
+    # FIX 2: evidence_sufficient is only True when every sub-question is supported.
+    evidence_sufficient = all_supported and len(updated) > 0
+
+    logger.debug("evaluate_evidence: evidence_sufficient=%s", evidence_sufficient)
     return {
         "sub_question_results": updated,
-        "evidence_sufficient": any_supported,
+        "evidence_sufficient": evidence_sufficient,
     }
 
 
 def refine_query(state: ResearchState) -> dict:
-    """Generate a refined search query targeting sub-questions with no support."""
+    """Generate a refined search query targeting sub-questions with no support.
+
+    FIX 1: LLM failures propagate; only the empty-output edge case is defaulted.
+    FIX 3: The refined query is built from the *specific* failed sub-questions,
+           not from the overall query, so it targets the right gap.
+    """
     failed = [
         r["sub_question"]
         for r in state["sub_question_results"]
@@ -271,22 +331,25 @@ def refine_query(state: ResearchState) -> dict:
     failed_text = "\n".join(f"- {_cap(_sanitise(q), 300)}" for q in failed)
     user_msg = REFINE_USER.format(query=original, failed=failed_text)
 
-    try:
-        refined = _call(REFINE_SYSTEM, user_msg)
-    except Exception:
-        logger.warning("refine_query failed; using original query")
+    refined = _call(REFINE_SYSTEM, user_msg)
+    if not refined:
+        logger.warning("refine_query returned empty string; using original query")
         refined = original
 
     new_count = state.get("iteration_count", 0) + 1
     logger.debug("refine_query: iteration=%d refined=%r", new_count, refined)
     return {
-        "refined_query": refined or original,
+        "refined_query": refined,
         "iteration_count": new_count,
     }
 
 
 def synthesize_answer(state: ResearchState) -> dict:
-    """Build an answer using only the retrieved evidence."""
+    """Build an answer using only the retrieved evidence.
+
+    FIX 1: LLM failures propagate; the empty-evidence short-circuit is preserved.
+    FIX 5: Evidence text is delimiter-escaped before insertion into the prompt.
+    """
     question = _sanitise(state.get("rewritten_query") or state["original_query"])
     all_evidence = [
         e for r in state["sub_question_results"] for e in r["evidence"]
@@ -294,17 +357,16 @@ def synthesize_answer(state: ResearchState) -> dict:
     if not all_evidence:
         return {"answer": _UNSUPPORTED_ANSWER, "answer_supported": False, "citations": []}
 
+    # FIX 5: Escape delimiter characters so document content cannot break out.
     evidence_text = "\n\n".join(
-        f"[{e['source']}] (section: {e['section'] or 'N/A'})\n{e['text']}"
+        f"[{_escape_delimiters(e['source'])}] "
+        f"(section: {_escape_delimiters(e['section'] or 'N/A')})\n"
+        f"{_escape_delimiters(e['text'])}"
         for e in all_evidence
     )
     user_msg = SYNTHESIZE_USER.format(question=question, evidence=evidence_text)
 
-    try:
-        answer = _call(SYNTHESIZE_SYSTEM, user_msg)
-    except Exception:
-        logger.exception("synthesize_answer failed")
-        answer = _UNSUPPORTED_ANSWER
+    answer = _call(SYNTHESIZE_SYSTEM, user_msg)
 
     citations = sorted({e["source"] for e in all_evidence if e["source"]})
     logger.debug("synthesize_answer: citations=%s", citations)
@@ -312,7 +374,11 @@ def synthesize_answer(state: ResearchState) -> dict:
 
 
 def verify_answer(state: ResearchState) -> dict:
-    """Verify the answer against the evidence; remove unsupported claims."""
+    """Verify the answer against the evidence; remove unsupported claims.
+
+    FIX 1: LLM failures propagate; the empty-evidence short-circuit is preserved.
+    FIX 5: Evidence text is delimiter-escaped before insertion into the prompt.
+    """
     answer = state.get("answer", "")
     all_evidence = [
         e for r in state["sub_question_results"] for e in r["evidence"]
@@ -321,16 +387,14 @@ def verify_answer(state: ResearchState) -> dict:
     if not all_evidence or not state.get("answer_supported", False):
         return {"answer": _UNSUPPORTED_ANSWER, "answer_supported": False}
 
+    # FIX 5: Escape delimiter characters in evidence.
     evidence_text = "\n\n".join(
-        f"[{e['source']}]\n{e['text']}" for e in all_evidence
+        f"[{_escape_delimiters(e['source'])}]\n{_escape_delimiters(e['text'])}"
+        for e in all_evidence
     )
     user_msg = VERIFY_USER.format(answer=answer, evidence=evidence_text)
 
-    try:
-        verified = _call(VERIFY_SYSTEM, user_msg)
-    except Exception:
-        logger.exception("verify_answer failed; returning previous answer")
-        verified = answer
+    verified = _call(VERIFY_SYSTEM, user_msg)
 
     # Detect when the LLM issued the unsupported signal
     unsupported_signal = "does not contain sufficient information"

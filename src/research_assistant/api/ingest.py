@@ -6,6 +6,12 @@ Security controls:
   never used as a filesystem path.
 - Secrets are never logged.
 - Internal errors return 500 with a generic message; no stack traces leak.
+
+Performance:
+- FIX 4: The endpoint is a plain ``def`` so FastAPI executes it in its
+  default thread pool, keeping the event loop free during blocking I/O
+  (parsing, embedding inference, Qdrant upsert).
+- Size is validated as early as possible, before any parsing work.
 """
 
 import logging
@@ -46,14 +52,19 @@ def _safe_title(filename: str) -> str:
     return name[:_MAX_FILENAME_LENGTH] or "untitled"
 
 
+# FIX 4: Changed from `async def` to `def` so FastAPI dispatches this to its
+# default threadpool executor, preventing blocking operations (text extraction,
+# local embedding inference, Qdrant upsert) from stalling the event loop.
 @router.post("/document", response_model=IngestResponse, status_code=status.HTTP_200_OK)
-async def ingest_document(file: UploadFile) -> IngestResponse:
+def ingest_document(file: UploadFile) -> IngestResponse:
     """Accept a document upload, parse and chunk it, embed each chunk, and
     store the results in Qdrant.
 
     Allowed types: PDF, plain text, Markdown (max 10 MB by default).
     """
-    raw = await file.read()
+    # FIX 4: UploadFile.file is a SpooledTemporaryFile; .read() is synchronous
+    # and safe inside a sync endpoint running in a thread.
+    raw = file.file.read()
     original_name = file.filename or "upload"
 
     try:

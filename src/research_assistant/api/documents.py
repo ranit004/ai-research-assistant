@@ -8,6 +8,6 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 @router.post("", response_model=IngestResponse, status_code=status.HTTP_200_OK)
-async def upload_document(file: UploadFile) -> IngestResponse:
+def upload_document(file: UploadFile) -> IngestResponse:
     """Accept a document upload, parse, chunk, embed, and index it into Qdrant."""
-    return await ingest_document(file)
+    return ingest_document(file)
