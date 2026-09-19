@@ -102,12 +102,13 @@ def similarity_search(
         raise ValueError("top_k must be between 1 and 100.")
 
     client = _get_client()
-    results = client.search(
+    response = client.query_points(
         collection_name=settings.qdrant_collection,
-        query_vector=query_vector,
+        query=query_vector,
         limit=top_k,
         score_threshold=score_threshold,
         with_payload=True,
     )
+    results = response.points
     logger.debug("Similarity search returned %d results.", len(results))
     return results

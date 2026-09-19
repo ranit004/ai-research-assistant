@@ -142,3 +142,32 @@ def test_retrieve_rejects_top_k_out_of_range(client: TestClient, monkeypatch) ->
 
     response = client.post("/retrieve", json={"query": "test", "top_k": 0})
     assert response.status_code == 422
+
+
+def test_similarity_search_uses_query_points(monkeypatch) -> None:
+    from qdrant_client.http.models import QueryResponse, ScoredPoint
+    import research_assistant.vectorstore.client as client_mod
+
+    mock_client = MagicMock()
+    mock_hit = ScoredPoint(
+        id="c1",
+        version=1,
+        score=0.85,
+        payload={"document_id": "doc1", "text": "hello"},
+    )
+    mock_client.query_points.return_value = QueryResponse(points=[mock_hit])
+    monkeypatch.setattr(client_mod, "_get_client", lambda: mock_client)
+
+    hits = client_mod.similarity_search(query_vector=[0.1, 0.2, 0.3], top_k=5, score_threshold=0.5)
+
+    assert len(hits) == 1
+    assert hits[0].id == "c1"
+    assert hits[0].score == 0.85
+    mock_client.query_points.assert_called_once_with(
+        collection_name=client_mod.settings.qdrant_collection,
+        query=[0.1, 0.2, 0.3],
+        limit=5,
+        score_threshold=0.5,
+        with_payload=True,
+    )
+

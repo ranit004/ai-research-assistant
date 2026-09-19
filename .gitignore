@@ -2,6 +2,13 @@
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+secrets/
+credentials/
 
 # Python
 __pycache__/
@@ -11,6 +18,13 @@ build/
 dist/
 .venv/
 venv/
+
+# Vectorstore & local data
+qdrant_storage/
+qdrant_data/
+*.sqlite
+*.sqlite3
+*.db
 
 # Tooling caches
 .pytest_cache/

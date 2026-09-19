@@ -16,7 +16,7 @@ import json
 import logging
 import re
 
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 
 from research_assistant.agent.prompts import (
     DECOMPOSE_SYSTEM,
@@ -52,14 +52,14 @@ _UNSUPPORTED_ANSWER = (
 )
 
 
-def _llm() -> ChatOpenAI:
-    """Return a ChatOpenAI instance. Lazy so import never fails without a key."""
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured.")
-    return ChatOpenAI(
-        model=settings.llm_model,
+def _llm() -> ChatGroq:
+    """Return a ChatGroq instance. Lazy so import never fails without a key."""
+    if not settings.groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
+    return ChatGroq(
+        model=settings.groq_model,
         temperature=settings.research_llm_temperature,
-        openai_api_key=settings.openai_api_key.get_secret_value(),
+        groq_api_key=settings.groq_api_key.get_secret_value(),
     )
 
 

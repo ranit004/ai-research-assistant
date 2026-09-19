@@ -35,10 +35,13 @@ class Settings(BaseSettings):
     qdrant_collection: str = "research_docs"
     qdrant_api_key: SecretStr | None = None
 
-    # ── Embeddings ─────────────────────────────────────────────────────────────
-    openai_api_key: SecretStr | None = None
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536
+    # ── Groq LLM ───────────────────────────────────────────────────────────────
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+
+    # ── Embeddings (local — no external API call) ───────────────────────────────
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_dim: int = 384
 
     # ── Ingestion limits ───────────────────────────────────────────────────────
     max_upload_bytes: int = 10 * 1024 * 1024  # 10 MB
@@ -51,7 +54,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 64      # overlap between consecutive chunks
 
     # ── Research engine ────────────────────────────────────────────────────────
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "openai/gpt-oss-120b"  # kept as alias; groq_model takes precedence
     research_llm_temperature: float = 0.0
     max_sub_questions: int = 4          # hard cap on decomposition
     max_research_iterations: int = 3    # prevents infinite refinement loops
